@@ -1,0 +1,301 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+from sqlalchemy import create_engine
+import os
+
+# Configuração da Página
+st.set_page_config(page_title="Analytics Olist - Dados Reais", layout="wide")
+
+# --- FUNÇÃO DE CARREGAMENTO E FUSÃO DE DADOS (SQL) ---
+@st.cache_data
+def load_data():
+    # Credenciais MySQL fornecidas
+    DB_HOST = "ip-45-79-142-173.cloudezapp.io"
+    DB_PORT = "3306"
+    DB_USER = "alunosqlharve"
+    DB_PASS = "Ed&ktw35j"
+    DB_NAME = "modulosql"
+
+    try:
+        # Criando a engine de conexão com MySQL
+        engine = create_engine(f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+        
+        with engine.connect() as conn:
+            # Carregamento das tabelas mantendo os nomes originais
+            df_orders = pd.read_sql("SELECT * FROM olist_orders_dataset", conn)
+            df_items = pd.read_sql("SELECT * FROM olist_order_items_dataset", conn)
+            df_products = pd.read_sql("SELECT * FROM olist_products_dataset", conn)
+            df_customers = pd.read_sql("SELECT * FROM olist_customers_dataset", conn)
+            df_sellers = pd.read_sql("SELECT * FROM olist_sellers_dataset", conn)
+            df_payments = pd.read_sql("SELECT * FROM olist_order_payments_dataset", conn)
+            df_reviews = pd.read_sql("SELECT * FROM olist_order_reviews_dataset", conn)
+
+        # --- FUSÃO DAS TABELAS (Estratégia LEFT JOIN) ---
+        
+        # Base: Pedidos
+        df = df_orders.copy()
+        
+        # + Itens
+        df = pd.merge(df, df_items, on='order_id', how='left')
+        
+        # + Produtos
+        df = pd.merge(df, df_products, on='product_id', how='left')
+        
+        # + Clientes
+        df = pd.merge(df, df_customers, on='customer_id', how='left')
+        
+        # + Vendedores
+        df = pd.merge(df, df_sellers, on='seller_id', how='left')
+        
+        # + Pagamentos (CORREÇÃO CRÍTICA DE DUPLICIDADE)
+        if not df_payments.empty:
+            df_payments['payment_value'] = pd.to_numeric(df_payments['payment_value'].astype(str).str.replace(',', '.'), errors='coerce')
+            # Ordena por valor e mantém apenas o maior pagamento por pedido
+            df_payments_unique = df_payments.sort_values('payment_value', ascending=False).drop_duplicates(subset=['order_id'], keep='first')
+            df = pd.merge(df, df_payments_unique, on='order_id', how='left')
+        
+        # + Reviews (CORREÇÃO DE DUPLICIDADE E CORREÇÃO DO ERRO DE 99%)
+        if 'review_comment_message' in df_reviews.columns:
+            # Substitui strings vazias por nulo para o cálculo de porcentagem correto
+            df_reviews['review_comment_message'] = df_reviews['review_comment_message'].replace('', pd.NA)
+            df_reviews = df_reviews.rename(columns={'review_comment_message': 'review_comment'})
+        
+        # Remove duplicatas de reviews (mantém a primeira encontrada)
+        df_reviews_unique = df_reviews.drop_duplicates(subset=['order_id'], keep='first')
+        df = pd.merge(df, df_reviews_unique, on='order_id', how='left')
+
+        # --- LIMPEZA E TIPAGEM ---
+        
+        # Converter colunas numéricas
+        numeric_cols = ['price', 'freight_value', 'product_weight_g', 'product_photos_qty', 'review_score', 'payment_installments']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
+
+        # Cálculo do Valor Total (Item + Frete)
+        df['total_payment'] = df['price'] + df['freight_value']
+
+        # Renomear colunas para Português
+        mapa_colunas = {
+            'order_status': 'Status do Pedido',
+            'order_purchase_timestamp': 'Data da Compra',
+            'order_approved_at': 'Data Aprovação',
+            'order_delivered_customer_date': 'Data Entrega Real',
+            'order_estimated_delivery_date': 'Data Entrega Prevista',
+            'customer_state': 'Estado do Cliente',
+            'seller_state': 'Estado do Vendedor',
+            'total_payment': 'Valor Total',
+            'payment_type': 'Tipo de Pagamento',
+            'payment_installments': 'Parcelas',
+            'review_score': 'Nota de Avaliação',
+            'review_comment': 'Comentário',
+            'product_category_name': 'Categoria do Produto',
+            'product_photos_qty': 'Qtd Fotos',
+            'product_weight_g': 'Peso (g)',
+            'price': 'Preço Unitário',
+            'freight_value': 'Valor do Frete',
+            'product_length_cm': 'Comprimento (cm)',
+            'product_height_cm': 'Altura (cm)',
+            'product_width_cm': 'Largura (cm)',
+            'customer_city': 'Cidade do Cliente',
+            'customer_zip_code_prefix': 'CEP Prefixo'
+        }
+        df = df.rename(columns=mapa_colunas)
+        
+        # Conversão de Datas
+        cols_data = ['Data da Compra', 'Data Aprovação', 'Data Entrega Real', 'Data Entrega Prevista']
+        for col in cols_data:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+        
+        return df
+
+    except Exception as e:
+        st.error(f"Erro ao processar dados via MySQL: {e}")
+        st.stop()
+
+# Carrega os dados
+df = load_data()
+
+# --- VERIFICAÇÃO DE SEGURANÇA ---
+if df.empty:
+    st.error("Erro Crítico: A tabela final ficou vazia.")
+    st.stop()
+
+st.title("🚀 Dashboard Executivo (Dados Validados)")
+st.caption(f"Base carregada via MySQL: {len(df):,} registros processados.")
+
+# --- ENGENHARIA DE NOVAS COLUNAS ---
+# Q1: Dias para Entrega
+if {'Data Entrega Real', 'Data Aprovação'}.issubset(df.columns):
+    df['Dias para Entrega'] = (df['Data Entrega Real'] - df['Data Aprovação']).dt.days
+
+# Q4: Status do Prazo
+if {'Data Entrega Real', 'Data Entrega Prevista'}.issubset(df.columns):
+    df['Entregue no Prazo'] = df['Data Entrega Real'] <= df['Data Entrega Prevista']
+    df['Status do Prazo'] = df['Entregue no Prazo'].map({True: 'No Prazo/Adiantado', False: 'Atrasado'})
+
+# Q6: Volume
+if {'Comprimento (cm)', 'Altura (cm)', 'Largura (cm)'}.issubset(df.columns):
+    df['Volume (cm3)'] = df['Comprimento (cm)'] * df['Altura (cm)'] * df['Largura (cm)']
+
+# Q8: Tipo de Frete
+if {'Estado do Cliente', 'Estado do Vendedor'}.issubset(df.columns):
+    df['Estado do Cliente'] = df['Estado do Cliente'].fillna('Desc')
+    df['Estado do Vendedor'] = df['Estado do Vendedor'].fillna('Desc')
+    df['Tipo de Frete'] = df.apply(lambda x: 'Local' if x['Estado do Cliente'] == x['Estado do Vendedor'] and x['Estado do Cliente'] != 'Desc' else 'Interestadual', axis=1)
+
+# Q9: Recompra (Proxy)
+if {'CEP Prefixo', 'Cidade do Cliente'}.issubset(df.columns):
+    df['ID Cliente (Proxy)'] = df['CEP Prefixo'].astype(str) + "_" + df['Cidade do Cliente']
+    contagem = df['ID Cliente (Proxy)'].value_counts()
+    recorrentes = contagem[contagem > 1].index
+    df['Cliente Recorrente'] = df['ID Cliente (Proxy)'].isin(recorrentes)
+    df['Tipo de Cliente'] = df['Cliente Recorrente'].map({True: 'Recorrente', False: 'Novo'})
+
+# Tratamento de Categoria
+if 'Categoria do Produto' in df.columns:
+    df['Categoria do Produto'] = df['Categoria do Produto'].astype(str).str.replace('_', ' ').str.title()
+
+# --- VISUALIZAÇÃO ---
+abas = st.tabs([
+    "📦 Logística", 
+    "💰 Vendas", 
+    "⭐ Satisfação", 
+    "🏷️ Produtos", 
+    "🗺️ Geografia", 
+    "🔄 Recompra"
+])
+
+# ABA 1: Logística
+with abas[0]:
+    st.subheader("Performance Logística")
+    col1, col2 = st.columns(2)
+    
+    if 'Dias para Entrega' in df.columns:
+        media_dias = df['Dias para Entrega'].mean()
+        val_media = f"{media_dias:.1f}" if pd.notna(media_dias) else "N/A"
+        col1.metric("Tempo Médio de Entrega", f"{val_media} dias")
+        fig = px.histogram(df, x='Dias para Entrega', nbins=30, title="Curva de Entrega (Dias)")
+        col1.plotly_chart(fig, use_container_width=True)
+
+    if 'Status do Prazo' in df.columns:
+        valid_prazos = df['Status do Prazo'].dropna()
+        if not valid_prazos.empty:
+            pct_prazo = (valid_prazos == 'No Prazo/Adiantado').mean() * 100
+            col2.metric("% No Prazo", f"{pct_prazo:.1f}%")
+            fig_pz = px.pie(df, names='Status do Prazo', title="Aderência ao Prazo", hole=0.4, color_discrete_sequence=['green', 'red'])
+            col2.plotly_chart(fig_pz, use_container_width=True)
+    
+    c3, c4 = st.columns(2)
+    if 'Peso (g)' in df.columns and 'Valor do Frete' in df.columns:
+        df_peso = df[(df['Peso (g)'] > 0) & (df['Valor do Frete'] > 0)]
+        if not df_peso.empty:
+            fig_peso = px.scatter(df_peso.sample(min(2000, len(df_peso))), x='Peso (g)', y='Valor do Frete', title="Peso x Frete (Amostra)", opacity=0.5)
+            c3.plotly_chart(fig_peso, use_container_width=True)
+    
+    if 'Tipo de Frete' in df.columns and 'Status do Prazo' in df.columns:
+        atrasos = df[df['Status do Prazo'] == 'Atrasado']
+        if not atrasos.empty:
+            fig_atr = px.histogram(atrasos, x='Tipo de Frete', title="Onde ocorrem os atrasos?")
+            c4.plotly_chart(fig_atr, use_container_width=True)
+
+# ABA 2: Vendas
+with abas[1]:
+    st.subheader("Análise Financeira")
+    if 'Data da Compra' in df.columns:
+        df_vendas = df.dropna(subset=['Data da Compra']).copy()
+        if not df_vendas.empty:
+            df_vendas['Mês/Ano'] = df_vendas['Data da Compra'].dt.to_period('M').astype(str)
+            
+            vendas_mes = df_vendas.groupby('Mês/Ano').agg(
+                Qtd_Pedidos=('Status do Pedido', 'count'),
+                Faturamento=('Valor Total', 'sum')
+            ).reset_index()
+            
+            if not vendas_mes.empty:
+                idx_ped = vendas_mes['Qtd_Pedidos'].idxmax()
+                idx_fat = vendas_mes['Faturamento'].idxmax()
+                pico_ped = vendas_mes.loc[idx_ped]
+                pico_fat = vendas_mes.loc[idx_fat]
+                
+                c1, c2 = st.columns(2)
+                c1.info(f"📅 Mais Pedidos: **{pico_ped['Mês/Ano']}** ({pico_ped['Qtd_Pedidos']})")
+                c2.success(f"💰 Maior Faturamento: **{pico_fat['Mês/Ano']}** (R$ {pico_fat['Faturamento']:,.2f})")
+                
+                st.plotly_chart(px.line(vendas_mes, x='Mês/Ano', y='Faturamento', markers=True, title="Faturamento Mensal"), use_container_width=True)
+
+# ABA 3: Satisfação (CORREÇÃO APLICADA AQUI)
+with abas[2]:
+    st.subheader("NPS & Comentários")
+    if 'Nota de Avaliação' in df.columns:
+        # Deduplicação por pedido para métricas de satisfação (evita inflar por itens do mesmo pedido)
+        df_satisfacao = df.drop_duplicates(subset=['order_id'])
+        
+        media = df_satisfacao['Nota de Avaliação'].mean()
+        val_media = f"{media:.2f}" if pd.notna(media) else "0.00"
+        
+        c1, c2 = st.columns([1,2])
+        c1.metric("Nota Média", f"{val_media}/5")
+        
+        if 'Comentário' in df_satisfacao.columns:
+            # Cálculo sobre pedidos únicos: Comentários Válidos / Total de Pedidos
+            total_pedidos = len(df_satisfacao)
+            comentarios_reais = df_satisfacao['Comentário'].notna().sum()
+            pct_coments = (comentarios_reais / total_pedidos) * 100
+            c1.metric("% Comentaram", f"{pct_coments:.1f}%")
+        
+        df_notas = df_satisfacao['Nota de Avaliação'].dropna()
+        if not df_notas.empty:
+            fig_notas = px.bar(df_notas.value_counts().reset_index(), x='Nota de Avaliação', y='count', title="Distribuição de Notas (Pedidos Únicos)")
+            c2.plotly_chart(fig_notas, use_container_width=True)
+
+# ABA 4: Produtos
+with abas[3]:
+    st.subheader("Análise de Produtos")
+    if 'Categoria do Produto' in df.columns:
+        df_cat = df[df['Categoria do Produto'] != 'Nan'] 
+        c1, c2 = st.columns(2)
+        top_cats = df_cat['Categoria do Produto'].value_counts().head(10).reset_index()
+        if not top_cats.empty:
+            c1.plotly_chart(px.bar(top_cats, x='count', y='Categoria do Produto', orientation='h', title="Mais Vendidos"), use_container_width=True)
+        bot_cats = df_cat['Categoria do Produto'].value_counts().tail(10).reset_index()
+        if not bot_cats.empty:
+            c2.plotly_chart(px.bar(bot_cats, x='count', y='Categoria do Produto', orientation='h', title="Menos Vendidos", color_discrete_sequence=['red']), use_container_width=True)
+
+        if 'Preço Unitário' in df.columns:
+            st.markdown("#### Preço x Volume de Vendas")
+            cat_perf = df_cat.groupby('Categoria do Produto').agg(
+                Preco_Medio=('Preço Unitário', 'mean'),
+                Vendas=('Status do Pedido', 'count')
+            ).reset_index()
+            if not cat_perf.empty:
+                st.plotly_chart(px.scatter(cat_perf, x='Preco_Medio', y='Vendas', hover_name='Categoria do Produto'), use_container_width=True)
+
+# ABA 5: Geografia
+with abas[4]:
+    st.subheader("Geografia")
+    c1, c2 = st.columns(2)
+    if 'Estado do Cliente' in df.columns:
+        c1.plotly_chart(px.bar(df['Estado do Cliente'].value_counts().head(10), title="Top Compradores (UF)"), use_container_width=True)
+    if 'Estado do Vendedor' in df.columns:
+        c2.plotly_chart(px.bar(df['Estado do Vendedor'].value_counts().head(10), title="Top Vendedores (UF)", color_discrete_sequence=['orange']), use_container_width=True)
+
+# ABA 6: Recompra
+with abas[5]:
+    st.subheader("Perfil de Recompra")
+    if 'Tipo de Cliente' in df.columns:
+        df_rec = df[df['Tipo de Cliente'] == 'Recorrente']
+        if not df_rec.empty:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Clientes Recorrentes", df_rec['ID Cliente (Proxy)'].nunique())
+            c2.metric("Ticket Médio", f"R$ {df_rec['Valor Total'].mean():.2f}")
+            c3.metric("Nota Média", f"{df_rec['Nota de Avaliação'].mean():.2f}")
+            
+            r1, r2 = st.columns(2)
+            if 'Tipo de Pagamento' in df_rec.columns:
+                r1.plotly_chart(px.pie(df_rec, names='Tipo de Pagamento', title="Pagamento Preferido na Recompra"), use_container_width=True)
+            if 'Categoria do Produto' in df_rec.columns:
+                top_rec = df_rec[df_rec['Categoria do Produto'] != 'Nan']['Categoria do Produto'].value_counts().head(5).reset_index()
+                r2.plotly_chart(px.bar(top_rec, x='count', y='Categoria do Produto', orientation='h', title="Top Categorias na Recompra"), use_container_width=True)
