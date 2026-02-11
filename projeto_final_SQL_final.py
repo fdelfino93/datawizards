@@ -171,12 +171,17 @@ abas = st.tabs([
 # ABA 1: Logística
 with abas[0]:
     st.subheader("Performance Logística")
+    st.caption("Q1: Tempo desde a aprovação do pedido até a entrega ao cliente. | Q6: Impacto do peso e volume no frete. | Q8: Atrasos por tipo de frete.")
     col1, col2 = st.columns(2)
-    
+
     if 'Dias para Entrega' in df.columns:
         media_dias = df['Dias para Entrega'].mean()
+        mediana_dias = df['Dias para Entrega'].median()
         val_media = f"{media_dias:.1f}" if pd.notna(media_dias) else "N/A"
-        col1.metric("Tempo Médio de Entrega", f"{val_media} dias")
+        val_mediana = f"{mediana_dias:.1f}" if pd.notna(mediana_dias) else "N/A"
+        m1, m2 = col1.columns(2)
+        m1.metric("Tempo Médio de Entrega", f"{val_media} dias", help="Média aritmética dos dias entre aprovação e entrega")
+        m2.metric("Tempo Mediano de Entrega", f"{val_mediana} dias", help="Valor central: 50% das entregas levam menos que isso")
         fig = px.histogram(df, x='Dias para Entrega', nbins=30, title="Curva de Entrega (Dias)")
         col1.plotly_chart(fig, use_container_width=True)
 
@@ -194,16 +199,27 @@ with abas[0]:
         if not df_peso.empty:
             fig_peso = px.scatter(df_peso.sample(min(2000, len(df_peso))), x='Peso (g)', y='Valor do Frete', title="Peso x Frete (Amostra)", opacity=0.5)
             c3.plotly_chart(fig_peso, use_container_width=True)
-    
+            c3.caption("Cada ponto representa um produto. Quanto mais pesado, maior tende a ser o frete.")
+
+    if 'Volume (cm3)' in df.columns and 'Valor do Frete' in df.columns:
+        df_vol = df[(df['Volume (cm3)'] > 0) & (df['Valor do Frete'] > 0)]
+        if not df_vol.empty:
+            fig_vol = px.scatter(df_vol.sample(min(2000, len(df_vol))), x='Volume (cm3)', y='Valor do Frete', title="Volume x Frete (Amostra)", opacity=0.5)
+            c4.plotly_chart(fig_vol, use_container_width=True)
+            c4.caption("Volume = Comprimento x Altura x Largura do produto. Analisa se o tamanho físico impacta no frete.")
+
+    c5, c6 = st.columns(2)
     if 'Tipo de Frete' in df.columns and 'Status do Prazo' in df.columns:
         atrasos = df[df['Status do Prazo'] == 'Atrasado']
         if not atrasos.empty:
             fig_atr = px.histogram(atrasos, x='Tipo de Frete', title="Onde ocorrem os atrasos?")
-            c4.plotly_chart(fig_atr, use_container_width=True)
+            c5.plotly_chart(fig_atr, use_container_width=True)
+            c5.caption("Local = vendedor e comprador no mesmo estado. Interestadual = estados diferentes.")
 
 # ABA 2: Vendas
 with abas[1]:
     st.subheader("Análise Financeira")
+    st.caption("Q2: Mês com maior volume de pedidos e mês com maior faturamento (Preço + Frete).")
     if 'Data da Compra' in df.columns:
         df_vendas = df.dropna(subset=['Data da Compra']).copy()
         if not df_vendas.empty:
@@ -229,6 +245,7 @@ with abas[1]:
 # ABA 3: Satisfação (CORREÇÃO APLICADA AQUI)
 with abas[2]:
     st.subheader("NPS & Comentários")
+    st.caption("Q3: Avaliação da satisfação dos clientes (notas de 1 a 5 e % que deixaram comentários). | Q4: Relação entre prazo de entrega e nota dada pelo cliente.")
     if 'Nota de Avaliação' in df.columns:
         # Deduplicação por pedido para métricas de satisfação (evita inflar por itens do mesmo pedido)
         df_satisfacao = df.drop_duplicates(subset=['order_id'])
@@ -251,9 +268,29 @@ with abas[2]:
             fig_notas = px.bar(df_notas.value_counts().reset_index(), x='Nota de Avaliação', y='count', title="Distribuição de Notas (Pedidos Únicos)")
             c2.plotly_chart(fig_notas, use_container_width=True)
 
+        # Q4: Cruzamento Prazo x Satisfação
+        if 'Status do Prazo' in df_satisfacao.columns:
+            st.markdown("#### Q4: Satisfação x Cumprimento do Prazo")
+            st.caption("Compara a nota de avaliação dos clientes que receberam no prazo (ou adiantado) vs. os que receberam atrasado.")
+            df_prazo_sat = df_satisfacao.dropna(subset=['Status do Prazo', 'Nota de Avaliação'])
+            if not df_prazo_sat.empty:
+                q4_c1, q4_c2 = st.columns(2)
+                media_por_prazo = df_prazo_sat.groupby('Status do Prazo')['Nota de Avaliação'].mean().reset_index()
+                fig_prazo_nota = px.bar(media_por_prazo, x='Status do Prazo', y='Nota de Avaliação',
+                    color='Status do Prazo', color_discrete_map={'No Prazo/Adiantado': 'green', 'Atrasado': 'red'},
+                    title="Nota Média por Status do Prazo", text_auto='.2f')
+                q4_c1.plotly_chart(fig_prazo_nota, use_container_width=True)
+
+                dist_prazo_nota = df_prazo_sat.groupby(['Status do Prazo', 'Nota de Avaliação']).size().reset_index(name='Quantidade')
+                fig_dist = px.bar(dist_prazo_nota, x='Nota de Avaliação', y='Quantidade', color='Status do Prazo',
+                    barmode='group', color_discrete_map={'No Prazo/Adiantado': 'green', 'Atrasado': 'red'},
+                    title="Distribuição de Notas: No Prazo vs Atrasado")
+                q4_c2.plotly_chart(fig_dist, use_container_width=True)
+
 # ABA 4: Produtos
 with abas[3]:
     st.subheader("Análise de Produtos")
+    st.caption("Q5: Categorias mais e menos vendidas, relação entre preço e volume de vendas, e impacto da quantidade de fotos do anúncio nas vendas.")
     if 'Categoria do Produto' in df.columns:
         df_cat = df[df['Categoria do Produto'] != 'Nan'] 
         c1, c2 = st.columns(2)
@@ -266,6 +303,7 @@ with abas[3]:
 
         if 'Preço Unitário' in df.columns:
             st.markdown("#### Preço x Volume de Vendas")
+            st.caption("Cada ponto representa uma categoria. Eixo X = preço médio dos produtos da categoria. Eixo Y = quantidade de itens vendidos.")
             cat_perf = df_cat.groupby('Categoria do Produto').agg(
                 Preco_Medio=('Preço Unitário', 'mean'),
                 Vendas=('Status do Pedido', 'count')
@@ -273,9 +311,26 @@ with abas[3]:
             if not cat_perf.empty:
                 st.plotly_chart(px.scatter(cat_perf, x='Preco_Medio', y='Vendas', hover_name='Categoria do Produto'), use_container_width=True)
 
+        # Q5: Fotos x Vendas
+        if 'Qtd Fotos' in df.columns:
+            st.markdown("#### Quantidade de Fotos do Anúncio x Vendas")
+            st.caption("Qtd de Fotos = número de imagens que o vendedor cadastrou no anúncio do produto no marketplace. Analisa se anúncios com mais fotos vendem mais.")
+            df_fotos = df_cat[df_cat['Qtd Fotos'] > 0].copy()
+            if not df_fotos.empty:
+                fotos_perf = df_fotos.groupby('Qtd Fotos').agg(
+                    Vendas=('Status do Pedido', 'count'),
+                    Preco_Medio=('Preço Unitário', 'mean')
+                ).reset_index()
+                f1, f2 = st.columns(2)
+                fig_fotos = px.bar(fotos_perf, x='Qtd Fotos', y='Vendas', title="Volume de Vendas por Qtd de Fotos")
+                f1.plotly_chart(fig_fotos, use_container_width=True)
+                fig_fotos_preco = px.bar(fotos_perf, x='Qtd Fotos', y='Preco_Medio', title="Preço Médio por Qtd de Fotos", color_discrete_sequence=['orange'])
+                f2.plotly_chart(fig_fotos_preco, use_container_width=True)
+
 # ABA 5: Geografia
 with abas[4]:
     st.subheader("Geografia")
+    st.caption("Q7: Estados (UF) com maior concentração de compradores e de vendedores no marketplace.")
     c1, c2 = st.columns(2)
     if 'Estado do Cliente' in df.columns:
         c1.plotly_chart(px.bar(df['Estado do Cliente'].value_counts().head(10), title="Top Compradores (UF)"), use_container_width=True)
@@ -285,6 +340,7 @@ with abas[4]:
 # ABA 6: Recompra
 with abas[5]:
     st.subheader("Perfil de Recompra")
+    st.caption("Q9: Padrão dos clientes que compraram mais de uma vez. Identificados por combinação de CEP + Cidade (proxy, pois a Olist anonimiza os clientes).")
     if 'Tipo de Cliente' in df.columns:
         df_rec = df[df['Tipo de Cliente'] == 'Recorrente']
         if not df_rec.empty:
@@ -293,9 +349,33 @@ with abas[5]:
             c2.metric("Ticket Médio", f"R$ {df_rec['Valor Total'].mean():.2f}")
             c3.metric("Nota Média", f"{df_rec['Nota de Avaliação'].mean():.2f}")
             
+            # Métricas adicionais
+            c4, c5, c6 = st.columns(3)
+            if 'Parcelas' in df_rec.columns:
+                c4.metric("Média de Parcelas", f"{df_rec['Parcelas'].mean():.1f}")
+            if 'Status do Prazo' in df_rec.columns:
+                prazo_rec = df_rec['Status do Prazo'].dropna()
+                if not prazo_rec.empty:
+                    pct_prazo_rec = (prazo_rec == 'No Prazo/Adiantado').mean() * 100
+                    c5.metric("% Entrega no Prazo", f"{pct_prazo_rec:.1f}%")
+            if 'Estado do Cliente' in df_rec.columns:
+                top_estado = df_rec['Estado do Cliente'].value_counts().index[0]
+                c6.metric("Estado com Mais Recompras", top_estado)
+
             r1, r2 = st.columns(2)
             if 'Tipo de Pagamento' in df_rec.columns:
                 r1.plotly_chart(px.pie(df_rec, names='Tipo de Pagamento', title="Pagamento Preferido na Recompra"), use_container_width=True)
             if 'Categoria do Produto' in df_rec.columns:
                 top_rec = df_rec[df_rec['Categoria do Produto'] != 'Nan']['Categoria do Produto'].value_counts().head(5).reset_index()
                 r2.plotly_chart(px.bar(top_rec, x='count', y='Categoria do Produto', orientation='h', title="Top Categorias na Recompra"), use_container_width=True)
+
+            r3, r4 = st.columns(2)
+            if 'Estado do Cliente' in df_rec.columns:
+                top_estados_rec = df_rec['Estado do Cliente'].value_counts().head(10).reset_index()
+                fig_loc = px.bar(top_estados_rec, x='count', y='Estado do Cliente', orientation='h', title="Top Estados - Clientes Recorrentes")
+                r3.plotly_chart(fig_loc, use_container_width=True)
+            if 'Parcelas' in df_rec.columns:
+                parcelas_dist = df_rec['Parcelas'].value_counts().sort_index().reset_index()
+                parcelas_dist.columns = ['Parcelas', 'Quantidade']
+                fig_parc = px.bar(parcelas_dist, x='Parcelas', y='Quantidade', title="Distribuição de Parcelas na Recompra")
+                r4.plotly_chart(fig_parc, use_container_width=True)
